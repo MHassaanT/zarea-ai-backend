@@ -22,12 +22,20 @@ let db;
 // --- Firebase Initialization ---
 function initializeFirebase() {
     try {
-        const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
-        if (!serviceAccountPath) {
-            console.error("❌ AI Processor: FIREBASE_SERVICE_ACCOUNT_PATH not set in .env.");
+        // *** START OF CHANGES ***
+        const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_API_BASE64;
+        
+        if (!serviceAccountBase64) {
+            // Updated environment variable check
+            console.error("❌ AI Processor: FIREBASE_SERVICE_ACCOUNT_API_BASE64 not set in .env.");
             process.exit(1);
         }
-        const serviceAccount = require(serviceAccountPath);
+
+        // Decode the Base64 string and parse it as JSON
+        const serviceAccountJson = Buffer.from(serviceAccountBase64, 'base64').toString('utf8');
+        const serviceAccount = JSON.parse(serviceAccountJson);
+        // *** END OF CHANGES ***
+
         admin.initializeApp({
             credential: admin.credential.cert(serviceAccount)
         });
@@ -35,7 +43,8 @@ function initializeFirebase() {
         console.log("🔥 AI Processor: Firebase Admin Initialized");
         
     } catch (error) {
-        console.error("❌ AI Processor: Error initializing Firebase Admin:", error.message);
+        // Enhanced error logging to catch decoding/parsing issues
+        console.error("❌ AI Processor: Error initializing Firebase Admin (check Base64 encoding/JSON format):", error.message);
         process.exit(1);
     }
 }
@@ -225,7 +234,7 @@ function startLeadProcessor() {
                     isLead: classification.isLead,
                     newLead: newLead, // ADDED: New field for status
                     userId,      
-                    phoneNumber, 
+                    phoneNumber,  
                 };
 
                 // --- Step 4: Generate Auto Reply (Only for classified leads) ---
@@ -241,7 +250,7 @@ function startLeadProcessor() {
                         // --- Step 5: Save Lead (Conditional on being a NEW client) ---
                         if (newLead) { // Only save to LEADS_COLLECTION if this is the first time contact is a lead
                             await db.collection(LEADS_COLLECTION).add({
-                                userId,           
+                                userId,         
                                 phoneNumber,
                                 rawMessageId: docId,
                                 contactId: message.from,
@@ -272,7 +281,6 @@ function startLeadProcessor() {
         });
     });
 }
-
 
 
 // --- Execute Main Function ---
