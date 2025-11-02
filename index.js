@@ -3,7 +3,7 @@
 // and prepares an auto-reply for the WhatsApp client to execute.
 
 require('dotenv').config(); 
-const admin = require('firebase-admin');
+const admin = require('firebase-service-account');
 
 // --- Global Variables ---
 const RAW_MESSAGES_COLLECTION = 'raw_messages';
@@ -128,9 +128,9 @@ async function callGeminiForClassification(messageBody) {
 
 
 /**
- * Calls Gemini to generate a professional auto-reply.
+ * Calls Gemini to generate a professional auto-reply that answers the question.
  * @param {string} messageBody - The original client message.
- * @param {string} intent - The classified intent.
+ * @param {string} intent - The classified intent (e.g., 'Work Visa Enquiry').
  * @param {boolean} isReturningClient - True if client has an existing record in LEADS_COLLECTION. 
  * @returns {Promise<string>} - The generated reply text.
  */
@@ -139,19 +139,28 @@ async function callGeminiForReply(messageBody, intent, isReturningClient = false
 
     console.log(`🤖 AI: Generating reply for intent: '${intent}' (Returning: ${isReturningClient})`);
     
-    // MODIFIED LOGIC: Adjust prompt based on whether the client is returning
+    // ⬇️ MODIFIED LOGIC: New, directive prompt to answer the question.
     let systemPrompt;
-    
+    const baseRequirement = `Your primary goal is to **answer the client's direct question** as concisely and informatively as possible, using the classified intent as context. For a query about requirements, provide a brief summary of 3-4 key requirements/steps. Conclude your message by offering to schedule a personalized call to discuss their specific profile and next steps. The total reply must be no more than five sentences.`;
+
     if (isReturningClient) {
-        systemPrompt = `You are a professional, friendly, and efficient immigration consultant's assistant. Your goal is to provide a brief, welcoming, and reassuring automated response to a **returning client**. The response must be 3-4 sentences maximum. **Acknowledge that they have contacted us before** and thank them for reaching out again with the intent: "${intent}". Confirm receipt of their message and ask what a good time for a brief, personalized consultation call is, mentioning you'll look up their previous details.`;
+        systemPrompt = `You are a professional, friendly, and efficient immigration consultant's assistant. You are responding to a **returning client**. Acknowledge their previous contact. ${baseRequirement}`;
     } else {
-        systemPrompt = `You are a professional, friendly, and efficient immigration consultant's assistant. Your goal is to provide a brief, welcoming, and reassuring automated response to a new lead. The response must be 3-4 sentences maximum. Acknowledge their interest in the identified intent: "${intent}". Confirm receipt of their message and ask what a good time for a brief, personalized consultation call is.`;
+        systemPrompt = `You are a professional, friendly, and efficient immigration consultant's assistant. You are responding to a new lead interested in the following intent: "${intent}". ${baseRequirement}`;
     }
 
-    const userQuery = `The client's original message was: "${messageBody}"`;
+    // --- Add a hardcoded response example to steer the AI's format (Few-shot prompting) ---
+    // This helps prevent repetitive phrasing and ensures the core request is addressed.
+    const fewShotExample = `\n\n---
+EXAMPLE CONVERSATION:
+Client: "Tell me about the requirements for getting a Canadian work permit."
+Your Reply: "Thanks for reaching out! To get a work permit in Canada, the general requirements often include having a valid job offer from a Canadian employer, securing a positive Labour Market Impact Assessment (LMIA) in most cases, and meeting language and educational standards. We've received your message and can look at your specific background to give tailored advice. What time works best for a brief consultation call to discuss your next steps?"
+---`;
+
+    const userQuery = `The client's original message was: "${messageBody}". The classified intent is: "${intent}". Please generate the reply.`;
 
     const payload = {
-        contents: [{ parts: [{ text: userQuery }] }],
+        contents: [{ parts: [{ text: fewShotExample + userQuery }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] }
     };
 
