@@ -3,7 +3,7 @@
 // and prepares an auto-reply for the WhatsApp client to execute.
 
 require('dotenv').config(); 
-const admin = require('firebase-admin');
+const admin = require('firebase-admin'); // FIX: Corrected typo 'firebase-service-account' to 'firebase-admin'
 
 // --- Global Variables ---
 const RAW_MESSAGES_COLLECTION = 'raw_messages';
@@ -22,19 +22,15 @@ let db;
 // --- Firebase Initialization ---
 function initializeFirebase() {
     try {
-        // *** START OF CHANGES ***
         const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_API_BASE64;
         
         if (!serviceAccountBase64) {
-            // Updated environment variable check
             console.error("❌ AI Processor: FIREBASE_SERVICE_ACCOUNT_API_BASE64 not set in .env.");
             process.exit(1);
         }
 
-        // Decode the Base64 string and parse it as JSON
         const serviceAccountJson = Buffer.from(serviceAccountBase64, 'base64').toString('utf8');
         const serviceAccount = JSON.parse(serviceAccountJson);
-        // *** END OF CHANGES ***
 
         admin.initializeApp({
             credential: admin.credential.cert(serviceAccount)
@@ -43,7 +39,6 @@ function initializeFirebase() {
         console.log("🔥 AI Processor: Firebase Admin Initialized");
         
     } catch (error) {
-        // Enhanced error logging to catch decoding/parsing issues
         console.error("❌ AI Processor: Error initializing Firebase Admin (check Base64 encoding/JSON format):", error.message);
         process.exit(1);
     }
@@ -66,7 +61,6 @@ async function callGeminiForClassification(messageBody) {
     const systemPrompt = "You are an expert lead classifier for an immigration consulting firm. Your task is to analyze the client's message and determine if it is a qualified sales lead (i.e., requesting a service, consultation, or general inquiry about visa/immigration) or if it is spam/a system message. Respond ONLY with a JSON object conforming to the schema. Do NOT include any extra text, markdown wrappers (like ```json), or explanations.";
     const userQuery = `Client Message: "${messageBody}"`;
     
-    // Define the required JSON output structure (Structured Output)
     const responseSchema = {
         type: "OBJECT",
         properties: {
@@ -100,7 +94,6 @@ async function callGeminiForClassification(messageBody) {
         }
         
         const result = await response.json();
-        
         const candidate = result.candidates?.[0];
 
         if (!candidate) {
@@ -128,36 +121,49 @@ async function callGeminiForClassification(messageBody) {
 
 
 /**
- * Calls Gemini to generate a professional auto-reply that answers the question.
- * @param {string} messageBody - The original client message.
- * @param {string} intent - The classified intent (e.g., 'Work Visa Enquiry').
- * @param {boolean} isReturningClient - True if client has an existing record in LEADS_COLLECTION. 
+ * Calls Gemini to generate a professional auto-reply that answers the question, using past intent for context.
+ * * @param {string} messageBody - The original client message.
+ * @param {string} intent - The classified intent of the CURRENT message.
+ * @param {boolean} isReturningClient - True if client has an existing record. 
+ * @param {string | null} previousIntent - The intent from the client's LAST message (if returning). <--- NEW PARAMETER
  * @returns {Promise<string>} - The generated reply text.
  */
-async function callGeminiForReply(messageBody, intent, isReturningClient = false) { 
+async function callGeminiForReply(messageBody, intent, isReturningClient = false, previousIntent = null) { // <--- UPDATED SIGNATURE
     if (!GEMINI_API_KEY) return "Reply failed: API Key Missing.";
 
-    console.log(`🤖 AI: Generating reply for intent: '${intent}' (Returning: ${isReturningClient})`);
+    console.log(`🤖 AI: Generating reply for intent: '${intent}' (Returning: ${isReturningClient}, Previous Intent: ${previousIntent})`);
     
-    // ⬇️ MODIFIED LOGIC: New, directive prompt to answer the question.
+    // MODIFIED LOGIC: Use previousIntent to set the system's focus
     let systemPrompt;
-    const baseRequirement = `Your primary goal is to **answer the client's direct question** as concisely and informatively as possible, using the classified intent as context. For a query about requirements, provide a brief summary of 3-4 key requirements/steps. Conclude your message by offering to schedule a personalized call to discuss their specific profile and next steps. The total reply must be no more than five sentences.`;
+    
+    const baseRequirement = `Your primary goal is to **answer the client's direct question** as concisely and informatively as possible. For complex queries (like 'requirements' or 'costs'), provide a brief summary of 3-4 key points. Conclude your message by offering to schedule a personalized call to discuss their specific profile and next steps. The total reply must be no more than five sentences.`;
 
     if (isReturningClient) {
-        systemPrompt = `You are a professional, friendly, and efficient immigration consultant's assistant. You are responding to a **returning client**. Acknowledge their previous contact. ${baseRequirement}`;
+        // If the client is returning and the *current* intent is general (e.g., "General Question") 
+        // but a *previous* intent was specific (e.g., "Investor Visa"), use the previous intent for context.
+        const contextIntent = (intent.includes('General') || intent.includes('Question')) && previousIntent 
+            ? previousIntent 
+            : intent;
+
+        systemPrompt = `You are a professional, friendly, and efficient immigration consultant's assistant. You are responding to a **returning client**. Acknowledge their previous contact. Address the current query: "${intent}" by relating it to the overall topic of **${contextIntent}**. ${baseRequirement}`;
     } else {
         systemPrompt = `You are a professional, friendly, and efficient immigration consultant's assistant. You are responding to a new lead interested in the following intent: "${intent}". ${baseRequirement}`;
     }
 
-    // --- Add a hardcoded response example to steer the AI's format (Few-shot prompting) ---
-    // This helps prevent repetitive phrasing and ensures the core request is addressed.
+    // --- Hardcoded response example to steer the AI's format (Few-shot prompting) ---
+    // This helps ensure the core request is addressed and context is maintained.
     const fewShotExample = `\n\n---
-EXAMPLE CONVERSATION:
-Client: "Tell me about the requirements for getting a Canadian work permit."
-Your Reply: "Thanks for reaching out! To get a work permit in Canada, the general requirements often include having a valid job offer from a Canadian employer, securing a positive Labour Market Impact Assessment (LMIA) in most cases, and meeting language and educational standards. We've received your message and can look at your specific background to give tailored advice. What time works best for a brief consultation call to discuss your next steps?"
+EXAMPLE 1 (New Lead):
+Client: "Tell me about work visa requirements."
+Your Reply: "Thanks for reaching out! To get a work permit, general requirements often include having a valid job offer, securing a Labour Market Impact Assessment (LMIA) in most cases, and meeting language and educational standards. We've received your message and can look at your specific background to give tailored advice. What time works best for a brief consultation call to discuss your next steps?"
+---
+EXAMPLE 2 (Returning Client, new question about the same topic):
+Previous Intent: 'Investor Visa Enquiry'
+Client: "Are there any special costs in this visa? Or anything different from other visas?"
+Your Reply: "Welcome back! Regarding the **Investor Visa** options, standard government application and biometric fees apply, with potential additional costs like medical exams or educational assessments depending on the specific program. Key differences from other visas often involve unique eligibility criteria, required documents, and processing timelines tailored to its purpose. We'd be happy to schedule a personalized call to discuss the exact costs and specific aspects relevant to your profile and visa category."
 ---`;
 
-    const userQuery = `The client's original message was: "${messageBody}". The classified intent is: "${intent}". Please generate the reply.`;
+    const userQuery = `The client's original message was: "${messageBody}". The classified intent of this message is: "${intent}". Please generate the reply.`;
 
     const payload = {
         contents: [{ parts: [{ text: fewShotExample + userQuery }] }],
@@ -209,7 +215,6 @@ function startLeadProcessor() {
                 const message = doc.data();
                 const docId = doc.id;
 
-                // Make sure userId exists
                 const userId = message.userId || "unknown_user";
                 const phoneNumber = message.phoneNumber || "unknown_phone";
 
@@ -220,28 +225,33 @@ function startLeadProcessor() {
 
                 let autoReplyText = null;
                 let isReturningClient = false; 
+                let previousIntent = null; // <--- ADDED: Variable to store previous context
 
-                // --- Step 2: Check for existing client/lead ---
+                // --- Step 2: Check for existing client/lead and get context ---
                 if (classification.isLead) {
-                    const existingLead = await db.collection(LEADS_COLLECTION)
+                    const existingLeadSnapshot = await db.collection(LEADS_COLLECTION)
                         .where('userId', '==', userId)
                         .where('phoneNumber', '==', phoneNumber)
+                        .orderBy('timestamp', 'desc') // Get the most recent lead record
                         .limit(1)
                         .get();
                     
-                    isReturningClient = !existingLead.empty;
-                    console.log(`🔍 [${userId}] Is returning client: ${isReturningClient}`);
+                    isReturningClient = !existingLeadSnapshot.empty;
+                    
+                    if (isReturningClient) {
+                        // Get the intent from the most recent lead record
+                        previousIntent = existingLeadSnapshot.docs[0].data().intent; 
+                    }
+                    console.log(`🔍 [${userId}] Is returning client: ${isReturningClient}, Last Intent: ${previousIntent}`);
                 }
                 
-                // --- Step 3: Define newLead status (UPDATED LOGIC) ---
-                // newLead is TRUE if the message is a qualified lead AND it's not from a returning client.
-                // isLead is TRUE regardless of prior contact, as long as the message is a sales inquiry.
+                // --- Step 3: Define newLead status ---
                 const newLead = classification.isLead && !isReturningClient;
 
                 let updateData = {
                     processed: true,
                     isLead: classification.isLead,
-                    newLead: newLead, // ADDED: New field for status
+                    newLead: newLead, 
                     userId,      
                     phoneNumber,  
                 };
@@ -250,14 +260,17 @@ function startLeadProcessor() {
                 if (classification.isLead) {
                     if (!["Classification Error", "API Error", "API Key Missing", "No Candidate", "No JSON Part"].includes(classification.intent)) {
                         
-                        // Pass the new context flag to get the appropriate reply
-                        autoReplyText = await callGeminiForReply(message.body, classification.intent, isReturningClient); 
+                        // Pass the new context flag AND the previousIntent to get the appropriate reply <--- UPDATED CALL
+                        autoReplyText = await callGeminiForReply(message.body, classification.intent, isReturningClient, previousIntent); 
 
                         updateData.replyPending = true;
                         updateData.autoReplyText = autoReplyText;
+                        updateData.intent = classification.intent; // ADDED: Store the current intent on the raw message
 
-                        // --- Step 5: Save Lead (Conditional on being a NEW client) ---
-                        if (newLead) { // Only save to LEADS_COLLECTION if this is the first time contact is a lead
+                        // --- Step 5: Save Lead (If it's a new or a returning lead with a *new primary intent*) ---
+                        // For simplicity in this implementation, we will continue to only save a new record if it is a truly NEW client.
+                        // If it is a returning client, the raw message is updated, but the LEADS_COLLECTION record is not.
+                        if (newLead) { 
                             await db.collection(LEADS_COLLECTION).add({
                                 userId,         
                                 phoneNumber,
@@ -271,19 +284,16 @@ function startLeadProcessor() {
                             console.log(`✅ [${userId}] NEW Lead saved to '${LEADS_COLLECTION}'.`);
                         } else {
                             console.log(`✅ [${userId}] Message from RETURNING client (isLead=true, newLead=false). Skipping new lead save to '${LEADS_COLLECTION}'.`);
-                            // Returning leads get an auto-reply but don't create a new record in the LEADS_COLLECTION.
                         }
 
                     } else {
                         console.log(`❌ [${userId}] Classification failed internally. Skipping auto-reply.`);
                     }
                 } else {
-                    // If not classified as a lead, isLead=false and newLead=false (by definition above).
                     console.log(`❌ [${userId}] Classified as not a lead.`);
                 }
 
                 // --- Step 6: Update raw message ---
-                // This happens for ALL messages, ensuring 'processed' is set to true.
                 await db.collection(RAW_MESSAGES_COLLECTION).doc(docId).update(updateData);
                 console.log(`✅ [${userId}] Updated raw message ${docId.substring(0, 10)} with processed status. isLead: ${classification.isLead}, newLead: ${newLead}.`);
             }
