@@ -3,7 +3,7 @@
 // and prepares an auto-reply for the WhatsApp client to execute.
 
 require('dotenv').config(); 
-const admin = require('firebase-service-account');
+const admin = require('firebase-admin');
 
 // --- Global Variables ---
 const RAW_MESSAGES_COLLECTION = 'raw_messages';
