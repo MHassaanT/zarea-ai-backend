@@ -43,14 +43,50 @@ function initializeFirebase() {
 }
 
 /**
+ * Fetches business context from Firestore for a given userId.
+ * Falls back to generic defaults if no context is set.
+ */
+async function getBusinessContext(userId) {
+  try {
+    const contextDoc = await db.collection('business_context').doc(userId).get();
+    if (contextDoc.exists) {
+      return contextDoc.data();
+    }
+    // Fallback: read from users collection
+    const userDoc = await db.collection('users').doc(userId).get();
+    if (userDoc.exists && userDoc.data().businessContext) {
+      return userDoc.data().businessContext;
+    }
+  } catch (err) {
+    console.warn(`⚠️ Could not fetch business context for ${userId}:`, err.message);
+  }
+  // Generic fallback if no context configured yet
+  return {
+    businessName: "This Business",
+    businessDescription: "a professional service provider",
+    servicesOffered: "various professional services",
+    faqs: "",
+    leadQualificationCriteria: "a client asking about pricing, booking, or a specific service",
+    tone: "professional",
+    handoffTrigger: "when the client requests to speak with a human or mentions an urgent issue",
+    industry: "general",
+  };
+}
+
+/**
  * Calls Gemini to classify the lead.
  */
-async function callGeminiForClassification(messageBody) {
+async function callGeminiForClassification(messageBody, userId) {
     if (!GEMINI_API_KEY) return { isLead: false, intent: "API Key Missing" };
     
+    const ctx = await getBusinessContext(userId);
+
     console.log(`\n🤖 AI: Classifying message: "${messageBody.substring(0, 50)}..."`);
     
-    const systemPrompt = "You are an expert lead classifier for an immigration consulting firm. Your task is to analyze the client's message and determine if it is a qualified sales lead (i.e., requesting a service, consultation, or general inquiry about visa/immigration) or if it is spam/a system message. Respond ONLY with a JSON object conforming to the schema. Do NOT include any extra text, markdown wrappers (like ```json), or explanations.";
+    const systemPrompt = `You are an expert lead classifier for ${ctx.businessName}, which is ${ctx.businessDescription}. 
+Services offered: ${ctx.servicesOffered}.
+Your task is to analyze the client's message and determine if it is a qualified sales lead (i.e., requesting a service, consultation, pricing, or general inquiry about the business) or if it is spam, a greeting with no intent, or a system message.
+Respond ONLY with a JSON object conforming to the schema. Do NOT include any extra text, markdown wrappers (like \`\`\`json), or explanations.`;
     const userQuery = `Client Message: "${messageBody}"`;
     
     const responseSchema = {
@@ -96,8 +132,16 @@ async function callGeminiForClassification(messageBody) {
 /**
  * Calls Gemini to evaluate Qualified Lead status.
  */
-async function callGeminiForQualification(currentMessage, totalMessagesFromClient, currentIntent) {
-    const systemPrompt = `You are a qualification specialist. Analyze the client's current message, their intent, and the length of the conversation (${totalMessagesFromClient} messages). Determine if the client is highly engaged and genuinely interested in moving forward. If the client has sent 3 or more messages AND the intent is specific (not just a greeting), set 'isQualified' to true. Set 'priority' based on engagement: 'High' for 3+ specific messages, 'Medium' for 2, 'Low' for 1. Respond ONLY with a JSON object.`;
+async function callGeminiForQualification(currentMessage, totalMessagesFromClient, currentIntent, userId) {
+    const ctx = await getBusinessContext(userId);
+
+    const systemPrompt = `You are a lead qualification specialist for ${ctx.businessName}.
+A qualified lead for this business is: ${ctx.leadQualificationCriteria}.
+Analyze the client's current message, their stated intent, and the length of the conversation (${totalMessagesFromClient} messages so far).
+Determine if the client is genuinely interested and engaged.
+If the client has sent 3 or more messages AND the intent is specific (not just a greeting), set 'isQualified' to true.
+Set 'priority' based on engagement: 'High' for 3+ specific messages, 'Medium' for 2, 'Low' for 1.
+Respond ONLY with a JSON object.`;
     const userQuery = `Current Message: "${currentMessage}". Current Intent: "${currentIntent}". Total Messages: ${totalMessagesFromClient}`;
 
     const responseSchema = {
@@ -165,42 +209,54 @@ async function callGeminiForExtraction(messageBody) {
  * Calls Gemini to generate a professional auto-reply.
  * INCLUDES PHASE 1 (Gateway) & PHASE 3 (Funnel Rules)
  */
-async function callGeminiForReply(messageBody, intent, isReturningClient, isQualified, missingName, missingEmail, totalMessagesFromClient) { 
+async function callGeminiForReply(messageBody, intent, isReturningClient, isQualified, missingName, missingEmail, totalMessagesFromClient, userId) { 
     if (!GEMINI_API_KEY) return "Reply failed: API Key Missing.";
+
+    const ctx = await getBusinessContext(userId);
 
     let conversationStage = 1;
     if (isQualified && (!missingName && !missingEmail)) conversationStage = 3;
     else if (isQualified && (missingName || missingEmail)) conversationStage = 2;
 
-    console.log(`🤖 AI: Generating reply (Stage: ${conversationStage}, Qualified: ${isQualified}, Missing Name: ${missingName}, Missing Email: ${missingEmail})`);
+    console.log(`🤖 AI: Generating reply (Stage: ${conversationStage}, Qualified: ${isQualified})`);
     
+    const toneInstruction = ctx.tone === "friendly"
+      ? "Use a warm, friendly tone."
+      : ctx.tone === "casual"
+      ? "Use a casual, conversational tone."
+      : "Use a professional, courteous tone.";
+
+    const handoffInstruction = ctx.handoffTrigger
+      ? `Escalate to a human team member when: ${ctx.handoffTrigger}.`
+      : "Offer to connect the client with a team member when they are fully qualified.";
+
     const funnelRules = `
-    CRITICAL FUNNEL RULES:
-    - You are currently in Stage ${conversationStage} of the conversation. 
-    - Stage 1 (Exploration): Answer questions, provide value, build rapport. Do NOT offer to book a call or speak with an agent.
-    - Stage 2 (Lead Capture): You MUST intercept the conversation. Acknowledge their question politely, but tell them you need their contact details before proceeding. Do NOT offer to book a call yet.
-    - Stage 3 (Conversion): The user is fully qualified. Offer to schedule a personalized call with an immigration agent.
-    
-    NEVER offer to book a call, speak with a human, or contact an immigration agent unless you are strictly in Stage 3.
-    `;
+CRITICAL FUNNEL RULES:
+- You are an AI assistant for ${ctx.businessName}: ${ctx.businessDescription}.
+- Services: ${ctx.servicesOffered}.
+- ${toneInstruction}
+- You are currently in Stage ${conversationStage} of the conversation.
+- Stage 1 (Exploration): Answer questions, provide value, build rapport. Do NOT offer to book a call or speak with a human yet.
+- Stage 2 (Lead Capture): You MUST intercept the conversation. Acknowledge the client's question politely, but tell them you need their contact details before proceeding. Do NOT answer their specific question yet.
+- Stage 3 (Conversion): The client is fully qualified and has provided contact details. ${handoffInstruction}
+
+NEVER offer to connect with a human or book a consultation unless you are strictly in Stage 3.
+${ctx.faqs ? `\nRelevant FAQs you can reference:\n${ctx.faqs}` : ""}
+`;
 
     let systemPrompt;
     
     if (conversationStage === 2) {
-        // --- Phase 1: The Gateway Intercept ---
         let promptPart = "";
         if (missingName && missingEmail) promptPart = "their Full Name and Email Address";
         else if (missingName) promptPart = "their Full Name";
         else if (missingEmail) promptPart = "their Email Address";
         
-        systemPrompt = `You are an AI assistant. ${funnelRules}\n\nThe user is asking a question, but we need their contact info first. Politely acknowledge their query, but strictly tell them you need ${promptPart} before you can provide specific advice or proceed further. Do not answer their specific question yet. Keep it to two sentences.`;
-
+        systemPrompt = `You are an AI assistant for ${ctx.businessName}. ${funnelRules}\n\nThe client is asking a question, but we need their contact info first. Politely acknowledge their query, but strictly tell them you need ${promptPart} before you can provide specific advice or proceed further. Do not answer their specific question yet. Keep it to two sentences. ${toneInstruction}`;
     } else if (conversationStage === 3) {
-        // --- Stage 3: Conversion ---
-        systemPrompt = `You are an AI assistant. ${funnelRules}\n\nCongratulate the client for providing their information. Confirm their details are saved, answer any lingering parts of their question briefly, and state that a consultant specializing in ${intent} will call them shortly.`;
+        systemPrompt = `You are an AI assistant for ${ctx.businessName}. ${funnelRules}\n\nThank the client for providing their information. Confirm their details are saved, briefly address any lingering part of their query, and let them know a specialist will follow up shortly regarding: ${intent}. ${toneInstruction}`;
     } else {
-        // --- Stage 1: Exploration ---
-        systemPrompt = `You are an AI assistant. ${funnelRules}\n\nAnswer the client's direct question concisely (3-4 points max). They have sent ${totalMessagesFromClient} messages so far. Be helpful, but remember your Stage 1 constraints—do NOT push them to a call yet.`;
+        systemPrompt = `You are an AI assistant for ${ctx.businessName}. ${funnelRules}\n\nAnswer the client's question concisely (3-4 points max). They have sent ${totalMessagesFromClient} messages so far. Be helpful but remember your Stage 1 constraints. ${toneInstruction}`;
     }
 
     const userQuery = `The client's message was: "${messageBody}".`;
@@ -245,7 +301,7 @@ function startLeadProcessor() {
 
                 console.log(`📨 [${userId}] Processing message ${docId.substring(0, 10)}...`);
 
-                const classification = await callGeminiForClassification(message.body);
+                const classification = await callGeminiForClassification(message.body, userId);
 
                 // --- Phase 4, Fix 2: Silent API Failures Handling ---
                 const errorIntents = ["Classification Error", "API Error", "API Key Missing", "No Candidate", "No JSON Part"];
@@ -288,7 +344,7 @@ function startLeadProcessor() {
                 
                 // --- Step 3: Qualification Check ---
                 if (classification.isLead && !isQualified) {
-                    const qualificationResult = await callGeminiForQualification(message.body, totalMessagesFromClient, classification.intent);
+                    const qualificationResult = await callGeminiForQualification(message.body, totalMessagesFromClient, classification.intent, userId);
                     isQualified = qualificationResult.isQualified;
                     leadPriority = qualificationResult.priority;
                 }
@@ -341,7 +397,7 @@ function startLeadProcessor() {
                 // --- Step 6: Generate Auto Reply ---
                 if (classification.isLead) {
                     // Passed the totalMessagesFromClient to help Gemini gauge the stage
-                    autoReplyText = await callGeminiForReply(message.body, classification.intent, isReturningClient, isQualified, missingName, missingEmail, totalMessagesFromClient); 
+                    autoReplyText = await callGeminiForReply(message.body, classification.intent, isReturningClient, isQualified, missingName, missingEmail, totalMessagesFromClient, userId); 
 
                     // --- Phase 2: Legal Disclaimer Appendage ---
                     if (autoReplyText) {
