@@ -74,6 +74,37 @@ async function getBusinessContext(userId) {
 }
 
 /**
+ * Fetches product catalog for a given userId and formats it as a text table.
+ */
+async function getProductCatalog(userId) {
+  try {
+    const catalogSnapshot = await db.collection('product_catalog')
+      .where('businessId', '==', userId)
+      .limit(1)
+      .get();
+    
+    if (catalogSnapshot.empty) return null;
+    
+    const data = catalogSnapshot.docs[0].data();
+    if (!data.columns || !data.rows || data.rows.length === 0) return null;
+    
+    // Format as a simple markdown-ish table for the AI
+    let table = `Product Catalog for ${userId}:\n`;
+    table += "| " + data.columns.join(" | ") + " |\n";
+    table += "| " + data.columns.map(() => "---").join(" | ") + " |\n";
+    
+    data.rows.forEach(row => {
+      table += "| " + data.columns.map(col => row[col] || "-").join(" | ") + " |\n";
+    });
+    
+    return table;
+  } catch (err) {
+    console.warn(`⚠️ Could not fetch product catalog for ${userId}:`, err.message);
+    return null;
+  }
+}
+
+/**
  * Calls Gemini to classify the lead.
  */
 async function callGeminiForClassification(messageBody, userId) {
@@ -209,7 +240,7 @@ async function callGeminiForExtraction(messageBody) {
  * Calls Gemini to generate a professional auto-reply.
  * INCLUDES PHASE 1 (Gateway) & PHASE 3 (Funnel Rules)
  */
-async function callGeminiForReply(messageBody, intent, isReturningClient, isQualified, missingName, missingEmail, totalMessagesFromClient, userId) { 
+async function callGeminiForReply(messageBody, intent, isReturningClient, isQualified, missingName, missingEmail, totalMessagesFromClient, userId, catalogTable = null) { 
     if (!GEMINI_API_KEY) return "Reply failed: API Key Missing.";
 
     const ctx = await getBusinessContext(userId);
@@ -242,6 +273,7 @@ CRITICAL FUNNEL RULES:
 
 NEVER offer to connect with a human or book a consultation unless you are strictly in Stage 3.
 ${ctx.faqs ? `\nRelevant FAQs you can reference:\n${ctx.faqs}` : ""}
+${catalogTable ? `\nProduct Catalog (reference this for product details):\n${catalogTable}` : ""}
 `;
 
     let systemPrompt;
@@ -396,8 +428,9 @@ function startLeadProcessor() {
 
                 // --- Step 6: Generate Auto Reply ---
                 if (classification.isLead) {
+                    const catalogTable = await getProductCatalog(userId);
                     // Passed the totalMessagesFromClient to help Gemini gauge the stage
-                    autoReplyText = await callGeminiForReply(message.body, classification.intent, isReturningClient, isQualified, missingName, missingEmail, totalMessagesFromClient, userId); 
+                    autoReplyText = await callGeminiForReply(messageBody, classification.intent, isReturningClient, isQualified, missingName, missingEmail, totalMessagesFromClient, userId, catalogTable); 
 
                     // --- Phase 2: Legal Disclaimer Appendage ---
                     if (autoReplyText) {
