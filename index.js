@@ -430,7 +430,7 @@ function startLeadProcessor() {
                 if (classification.isLead) {
                     const catalogTable = await getProductCatalog(userId);
                     // Passed the totalMessagesFromClient to help Gemini gauge the stage
-                    autoReplyText = await callGeminiForReply(messageBody, classification.intent, isReturningClient, isQualified, missingName, missingEmail, totalMessagesFromClient, userId, catalogTable); 
+                    autoReplyText = await callGeminiForReply(message.Body, classification.intent, isReturningClient, isQualified, missingName, missingEmail, totalMessagesFromClient, userId, catalogTable); 
 
                     // --- Phase 2: Legal Disclaimer Appendage ---
                     if (autoReplyText) {
